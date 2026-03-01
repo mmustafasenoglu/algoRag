@@ -1,27 +1,20 @@
-import os
-import json
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from groq import Groq
-from dotenv import load_dotenv
-
 # Optional RAG Context dependencies
 embedding_model = None
+RAG_ENABLED = os.environ.get("ENABLE_RAG", "false").lower() == "true"
+
 try:
     from fastembed import TextEmbedding
-    import re
     from pinecone import Pinecone
-    RAG_AVAILABLE = True
-    # Load model globally to avoid OOM and slow startup on every request
-    print("Loading embedding model...")
-    embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+    if RAG_ENABLED:
+        print("Loading embedding model...")
+        embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 except Exception as e:
-    print(f"RAG dependencies or model loading failed: {e}")
-    RAG_AVAILABLE = False
+    print(f"RAG dependencies failed to load: {e}")
+    RAG_ENABLED = False
 
 load_dotenv()
 
-app = FastAPI(title="AlgoRAG API", description="AI Problem Generation Microservice")
+app = FastAPI(title="AlgoRAG API")
 
 class ProblemRequest(BaseModel):
     prompt: str
@@ -32,106 +25,76 @@ async def health():
         "status": "ok",
         "groq_configured": bool(os.environ.get("GROQ_API_KEY")),
         "pinecone_configured": bool(os.environ.get("PINECONE_API_KEY")),
-        "rag_available": RAG_AVAILABLE
+        "rag_enabled": RAG_ENABLED,
+        "embedding_model_loaded": embedding_model is not None
     }
 
 @app.post("/api/generate_problem")
 async def generate_problem(request: ProblemRequest):
-    prompt_text = request.prompt
+    print(f"Received request: {request.prompt[:50]}...")
     
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="Missing required parameter: prompt")
-        
     groq_api_key = os.environ.get("GROQ_API_KEY")
     if not groq_api_key:
-        raise HTTPException(status_code=500, detail="AI service is not configured (Missing GROQ_API_KEY)")
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY missing")
         
-    # Optional RAG Context
-    pinecone_api_key = os.environ.get("PINECONE_API_KEY")
     rag_context = ""
-    
-    if pinecone_api_key and RAG_AVAILABLE and embedding_model:
+    if RAG_ENABLED and embedding_model:
         try:
-            # 1. Generate embedding for user prompt
-            query_vector = list(embedding_model.embed([prompt_text]))[0].tolist()
-            
-            # 2. Search Pinecone vector database
-            pc = Pinecone(api_key=pinecone_api_key)
+            print("Fetching RAG context...")
+            pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
             index = pc.Index("algoforge-rag")
+            query_vector = list(embedding_model.embed([request.prompt]))[0].tolist()
+            search_results = index.query(vector=query_vector, top_k=3, include_metadata=True)
             
-            search_results = index.query(
-                vector=query_vector,
-                top_k=3,
-                include_metadata=True
-            )
-            
-            # 3. Format RAG context
             if search_results.get("matches"):
-                rag_context = "\n\n--- REFERENCE EXAMPLES (For Inspiration & Quality Standards) ---\n"
-                rag_context += "Use the following high-quality examples to understand the expected format.\n\n"
+                rag_context = "\n\n--- REFERENCE EXAMPLES ---\n"
                 for i, match in enumerate(search_results["matches"]):
                     meta = match.get("metadata", {})
-                    title = meta.get("title", "Unknown")
-                    diff = meta.get("difficulty", "Medium")
-                    desc = meta.get("description", "")
-                    rag_context += f"Example {i+1}:\nTitle: {title}\nDifficulty: {diff}\nDescription:\n{desc}\n\n"
+                    rag_context += f"Example {i+1}:\nTitle: {meta.get('title')}\nDescription: {meta.get('description')}\n\n"
         except Exception as e:
-            print(f"RAG Error (Non-fatal): {e}")
+            print(f"RAG Error: {e}")
             
-    # Instruct AI to construct the complete API payload
     system_prompt = f"""
-You are an expert competitive programming problem setter. 
-Your task is to generate a complete algorithm problem based on the user's prompt. 
-Your response MUST be in Turkish.
-Your response MUST be a valid JSON object.
+Sana verilen konuya uygun, kurumsal kalitede bir algoritma problemi üret. 
+Yanıtın TAMAMEN Türkçe olmalı. 
+Yanıtın sadece aşağıdaki JSON formatında olmalı:
 
-The JSON object MUST have the following strict structure:
 {{
-  "title": "A short, descriptive title",
-  "description": "HTML formatted detailed story and description of the problem",
-  "input_description": "HTML formatted explanation of the input",
-  "output_description": "HTML formatted explanation of the expected output",
-  "hint": "HTML formatted hints or constraints",
+  "title": "Problem Başlığı",
+  "description": "HTML formatında problem açıklaması",
+  "input_description": "Input formatı açıklaması",
+  "output_description": "Output formatı açıklaması",
+  "hint": "İpuçları",
+  "tags": ["Dizi", "Algoritma"],
   "samples": [
-    {{
-      "input": "Sample raw input data",
-      "output": "Sample raw output data",
-      "explanation": "LeetCode style detailed explanation"
-    }}
+    {{ "input": "...", "output": "...", "explanation": "..." }}
   ],
   "hidden_test_cases": [
-    {{
-      "input": "Hidden raw input 1",
-      "output": "Hidden raw output 1"
-    }}
+    {{ "input": "...", "output": "..." }}
   ],
-  "tags": ["Tag1", "Tag2"],
   "template": {{
-    "C++": "<FULL EXECUTABLE C++ TEMPLATE>",
-    "Java": "<FULL EXECUTABLE Java TEMPLATE>",
-    "Python3": "<FULL EXECUTABLE Python3 TEMPLATE>",
-    "C": "<FULL EXECUTABLE C TEMPLATE>",
-    "JavaScript": "<FULL EXECUTABLE JavaScript TEMPLATE>"
+    "C++": "// CODE HERE",
+    "Java": "// CODE HERE",
+    "Python3": "# CODE HERE",
+    "C": "// CODE HERE",
+    "JavaScript": "// CODE HERE"
   }}
 }}
 
-CRITICAL TEMPLATE RULES (Apply to all 5 languages):
-1. Use //PREPEND BEGIN ... //PREPEND END for imports.
-2. Use //TEMPLATE BEGIN ... //TEMPLATE END for the solution stub.
-3. Use //APPEND BEGIN ... //APPEND END for the main driver code.
-4. Ensure the APPEND I/O logic exactly matches the test case input format.
-
-CRITICAL TEST CASE RULES:
-1. EXPLICITLY generate 20 items in `hidden_test_cases`.
-2. Items 17-20 MUST be large stress tests (arrays of 3000+ elements).
+KURALLAR:
+1. Template'ler //PREPEND, //TEMPLATE, //APPEND bloklarını içermeli.
+2. Toplam 20 tane 'hidden_test_cases' üret.
+3. JSON dışında hiçbir metin yazma.
 {rag_context}
 """
+    
     client = Groq(api_key=groq_api_key)
     try:
+        print("Calling Groq API...")
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt_text}
+                {"role": "user", "content": request.prompt}
             ],
             model="llama-3.3-70b-versatile",
             temperature=0.7,
@@ -139,19 +102,13 @@ CRITICAL TEST CASE RULES:
             response_format={"type": "json_object"}
         )
         
-        generated_content = chat_completion.choices[0].message.content
-        parsed_json = json.loads(generated_content)
-        
-        # Validate critical fields
-        required = ["title", "description", "input_description", "output_description", "hint", "samples", "hidden_test_cases", "template"]
-        for field in required:
-            if field not in parsed_json:
-                parsed_json[field] = [] if field in ["samples", "hidden_test_cases", "tags"] else {} if field == "template" else ""
-
-        return parsed_json
+        print("Response received from Groq.")
+        return json.loads(chat_completion.choices[0].message.content)
         
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"API ERROR: {error_details}")
-        raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
+        print(f"CRITICAL ERROR: {str(e)}")
+        # Return a JSON object even for errors so the frontend can display the message
+        return {
+            "error": True,
+            "message": str(e)
+        }
