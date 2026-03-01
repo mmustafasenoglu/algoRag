@@ -1,7 +1,9 @@
-# Force Cache Bust - Build 4
+# Force Cache Bust - RAG ENABLE
 fastapi==0.104.1
 uvicorn==0.24.0.post1
 pydantic==2.5.2
 groq>=1.0.0
 httpx>=0.28.1
 python-dotenv==1.0.1
+pinecone-client
+fastembed==0.2.6

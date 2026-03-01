@@ -9,9 +9,25 @@ load_dotenv()
 
 app = FastAPI(title="AlgoRAG API Debug")
 
+# Optional RAG Global State
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from fastembed import TextEmbedding
+        print("DEBUG: Loading embedding model...")
+        _embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+    return _embedding_model
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "debug_mode": True}
+    return {
+        "status": "ok", 
+        "debug_mode": True,
+        "rag_ready": os.environ.get("ENABLE_RAG", "false").lower() == "true",
+        "pinecone_key": bool(os.environ.get("PINECONE_API_KEY"))
+    }
 
 @app.post("/api/generate_problem")
 async def generate_problem(request: Request):
@@ -26,6 +42,29 @@ async def generate_problem(request: Request):
         groq_api_key = os.environ.get("GROQ_API_KEY")
         if not groq_api_key:
             return {"error": True, "message": "GROQ_API_KEY missing"}
+
+        # --- RAG Context Fetching (Optional) ---
+        rag_context = ""
+        ENABLE_RAG = os.environ.get("ENABLE_RAG", "false").lower() == "true"
+        if ENABLE_RAG:
+            try:
+                print("DEBUG: Attempting RAG...")
+                from pinecone import Pinecone
+                pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+                index = pc.Index("algoforge-rag")
+                
+                model = get_embedding_model()
+                query_vector = list(model.embed([prompt_text]))[0].tolist()
+                
+                search_results = index.query(vector=query_vector, top_k=2, include_metadata=True)
+                if search_results.get("matches"):
+                    rag_context = "\n\n--- REFERENCE EXAMPLES ---\n"
+                    for match in search_results["matches"]:
+                        meta = match.get("metadata", {})
+                        rag_context += f"Example: {meta.get('title')}\n{meta.get('description')}\n\n"
+                    print("DEBUG: RAG context added.")
+            except Exception as rag_err:
+                print(f"DEBUG: RAG failed (non-fatal): {rag_err}")
 
         client = Groq(api_key=groq_api_key)
         
@@ -65,11 +104,10 @@ Yanıtın sadece aşağıdaki JSON formatında olmalı (Markdown blokları kulla
 
 KURALLAR:
 1. 'template' alanında mutlaka C++, Java, Python3, C ve JavaScript dilleri olmalı.
-2. 'hidden_test_cases' listesinde toplam 20 adet test case üret.
-3. HTML etiketlerini (<b>, <p>, <pre> vb.) açıklamalar için kullan.
+{rag_context}
 """
         
-        print("DEBUG: Calling Groq with full schema...")
+        print("DEBUG: Calling Groq...")
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -83,7 +121,7 @@ KURALLAR:
         
         parsed_json = json.loads(chat_completion.choices[0].message.content)
         
-        # Ensure all required fields exist to prevent UI display issues
+        # Validation
         required_fields = ["title", "description", "input_description", "output_description", "hint", "samples", "hidden_test_cases", "template"]
         for field in required_fields:
             if field not in parsed_json:
