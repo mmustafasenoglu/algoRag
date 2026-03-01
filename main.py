@@ -38,41 +38,42 @@ async def health():
 
 @app.post("/api/generate_problem")
 async def generate_problem(request: ProblemRequest):
-    print(f"Received request: {request.prompt[:50]}...")
-    
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY missing")
-        
-    rag_context = ""
-    if RAG_ENABLED and embedding_model:
-        try:
-            print("Fetching RAG context...")
-            pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-            index = pc.Index("algoforge-rag")
-            query_vector = list(embedding_model.embed([request.prompt]))[0].tolist()
-            search_results = index.query(vector=query_vector, top_k=3, include_metadata=True)
+    print(f"DEBUG: Starting generation for prompt: {request.prompt[:50]}...")
+    try:
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if not groq_api_key:
+            return {"error": True, "message": "GROQ_API_KEY is missing in environment"}
             
-            if search_results.get("matches"):
-                rag_context = "\n\n--- REFERENCE EXAMPLES ---\n"
-                for i, match in enumerate(search_results["matches"]):
-                    meta = match.get("metadata", {})
-                    rag_context += f"Example {i+1}:\nTitle: {meta.get('title')}\nDescription: {meta.get('description')}\n\n"
-        except Exception as e:
-            print(f"RAG Error: {e}")
-            
-    system_prompt = f"""
-Sana verilen konuya uygun, kurumsal kalitede bir algoritma problemi üret. 
-Yanıtın TAMAMEN Türkçe olmalı. 
-Yanıtın sadece aşağıdaki JSON formatında olmalı:
+        rag_context = ""
+        if RAG_ENABLED and embedding_model:
+            try:
+                print("DEBUG: Fetching RAG context...")
+                pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+                index = pc.Index("algoforge-rag")
+                query_vector = list(embedding_model.embed([request.prompt]))[0].tolist()
+                search_results = index.query(vector=query_vector, top_k=3, include_metadata=True)
+                
+                if search_results.get("matches"):
+                    rag_context = "\n\n--- REFERENCE EXAMPLES ---\n"
+                    for i, match in enumerate(search_results["matches"]):
+                        meta = match.get("metadata", {})
+                        rag_context += f"Example {i+1}:\nTitle: {meta.get('title')}\nDescription: {meta.get('description')}\n\n"
+                        
+            except Exception as rag_e:
+                print(f"DEBUG RAG Error (Non-fatal): {rag_e}")
+                
+        system_prompt = f"""
+Sana verilen konuya uygun bir algoritma problemi üret. 
+Yanıtın TAMAMEN Türkçe olsun. 
+Yanıtın sadece JSON formatında olsun:
 
 {{
-  "title": "Problem Başlığı",
-  "description": "HTML formatında problem açıklaması",
-  "input_description": "Input formatı açıklaması",
-  "output_description": "Output formatı açıklaması",
-  "hint": "İpuçları",
-  "tags": ["Dizi", "Algoritma"],
+  "title": "Başlık",
+  "description": "HTML Açıklama",
+  "input_description": "Input Açıklaması",
+  "output_description": "Output Açıklaması",
+  "hint": "İpucu",
+  "tags": ["Dizi"],
   "samples": [
     {{ "input": "...", "output": "...", "explanation": "..." }}
   ],
@@ -80,24 +81,20 @@ Yanıtın sadece aşağıdaki JSON formatında olmalı:
     {{ "input": "...", "output": "..." }}
   ],
   "template": {{
-    "C++": "// CODE HERE",
-    "Java": "// CODE HERE",
-    "Python3": "# CODE HERE",
-    "C": "// CODE HERE",
-    "JavaScript": "// CODE HERE"
+    "C++": "// CODE",
+    "Java": "// CODE",
+    "Python3": "# CODE",
+    "C": "// CODE",
+    "JavaScript": "// CODE"
   }}
 }}
-
-KURALLAR:
-1. Template'ler //PREPEND, //TEMPLATE, //APPEND bloklarını içermeli.
-2. Toplam 20 tane 'hidden_test_cases' üret.
-3. JSON dışında hiçbir metin yazma.
 {rag_context}
 """
-    
-    client = Groq(api_key=groq_api_key)
-    try:
-        print("Calling Groq API...")
+        
+        print("DEBUG: Initializing Groq client...")
+        client = Groq(api_key=groq_api_key)
+        
+        print("DEBUG: Calling Groq API...")
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -109,13 +106,16 @@ KURALLAR:
             response_format={"type": "json_object"}
         )
         
-        print("Response received from Groq.")
-        return json.loads(chat_completion.choices[0].message.content)
+        print("DEBUG: Groq API response received.")
+        content = chat_completion.choices[0].message.content
+        return json.loads(content)
         
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
-        # Return a JSON object even for errors so the frontend can display the message
+        import traceback
+        err_msg = traceback.format_exc()
+        print(f"CRITICAL ERROR:\n{err_msg}")
         return {
             "error": True,
-            "message": str(e)
+            "message": str(e),
+            "traceback": err_msg
         }
