@@ -69,75 +69,58 @@ async def generate_problem(request: ProblemRequest):
             
     # Instruct AI to construct the complete API payload
     system_prompt = f"""
-You are an expert technical interviewer and competitive programming problem setter (like those at LeetCode or Codeforces). 
+You are an expert competitive programming problem setter. 
 Your task is to generate a complete algorithm problem based on the user's prompt. 
-You MUST output ONLY a pure, valid, raw JSON object (without Markdown block wrappers like ```json).
+Your response MUST be in Turkish.
+Your response MUST be a valid JSON object.
 
-The JSON object MUST EXACTLY MATCH the following structure and schema:
-
+The JSON object MUST have the following strict structure:
 {{
   "title": "A short, descriptive title",
-  "description": "The detailed problem statement in English. Include context and constraints precisely.",
-  "input_description": "Clear explanation of how the input is formatted. Example: 'The first line contains an integer T, the number of test cases. Valid formatting rule required.'",
-  "output_description": "Clear explanation of what the output should be and its format.",
+  "description": "HTML formatted detailed story and description of the problem",
+  "input_description": "HTML formatted explanation of the input",
+  "output_description": "HTML formatted explanation of the expected output",
+  "hint": "HTML formatted hints or constraints",
   "samples": [
     {{
-      "input": "Sample raw input data exactly as it would hit stdin.",
-      "output": "Sample raw output data exactly as it should be printed.",
-      "explanation": "LeetCode style detailed explanation of how the answer is derived from the sample input."
+      "input": "Sample raw input data",
+      "output": "Sample raw output data",
+      "explanation": "LeetCode style detailed explanation"
     }}
   ],
   "hidden_test_cases": [
     {{
-      "input": "Hidden raw input data 1",
-      "output": "Hidden raw output data corresponding to the input 1"
+      "input": "Hidden raw input 1",
+      "output": "Hidden raw output 1"
     }}
   ],
   "tags": ["Tag1", "Tag2"],
   "template": {{
-    "C++": "<FULL EXECUTABLE C++ TEMPLATE - see rules below>",
-    "Java": "<FULL EXECUTABLE Java TEMPLATE - see rules below>",
-    "Python3": "<FULL EXECUTABLE Python3 TEMPLATE - see rules below>",
-    "C": "<FULL EXECUTABLE C TEMPLATE - see rules below>",
-    "JavaScript": "<FULL EXECUTABLE JavaScript TEMPLATE - see rules below>"
+    "C++": "<FULL EXECUTABLE C++ TEMPLATE>",
+    "Java": "<FULL EXECUTABLE Java TEMPLATE>",
+    "Python3": "<FULL EXECUTABLE Python3 TEMPLATE>",
+    "C": "<FULL EXECUTABLE C TEMPLATE>",
+    "JavaScript": "<FULL EXECUTABLE JavaScript TEMPLATE>"
   }}
 }}
 
-CRITICAL TEMPLATE RULES:
-1. You MUST generate a "template" object containing EXACTLY FIVE keys: "C++", "Java", "Python3", "C", and "JavaScript".
-2. The templates MUST follow a LeetCode-style structure with THREE sections:
-   - //PREPEND BEGIN ... //PREPEND END : necessary imports and global declarations only
-   - //TEMPLATE BEGIN ... //TEMPLATE END : the function/class signature the user will implement. This MUST contain ONLY the method signature and a placeholder body (// TODO or pass). ABSOLUTELY DO NOT write the actual algorithm or solution logic here — the user must implement it themselves.
-   - //APPEND BEGIN ... //APPEND END : a complete, RUNNABLE driver that reads stdin, calls the user's function, and prints the result.
-3. WARNING: The //TEMPLATE section must NEVER contain a working solution. If you put real algorithm logic inside //TEMPLATE, users will see the answer and the problem becomes useless. Only a stub/skeleton is allowed.
-4. The //APPEND section is CRITICAL and MUST NOT be empty. Tailor it exactly to the problem's input/output format.
-5. BEFORE writing the APPEND driver and test cases, decide on ONE fixed input format (e.g., "first line: n, second line: n space-separated integers") and use it CONSISTENTLY in both the APPEND stdin reading code AND every single test case input. A mismatch will cause Runtime Errors.
-6. Escape ALL newline characters as `\\n` inside the JSON template strings.
-7. ABSOLUTELY NO unescaped double quotes inside the JSON string values.
-
-TEMPLATE EXAMPLE (for a graph shortest-path problem in C++):
-"C++": "//PREPEND BEGIN\\n#include <iostream>\\n#include <vector>\\n#include <queue>\\n#include <limits>\\nusing namespace std;\\n//PREPEND END\\n\\n//TEMPLATE BEGIN\\nclass Solution {{\\npublic:\\n    vector<int> solve(int n, vector<vector<int>>& edges, int src) {{\\n        // TODO: Implement here\\n    }}\\n}};\\n//TEMPLATE END\\n\\n//APPEND BEGIN\\nint main() {{\\n    ios_base::sync_with_stdio(false);\\n    cin.tie(NULL);\\n    int n, m, s;\\n    cin >> n >> m >> s;\\n    vector<vector<int>> edges(m, vector<int>(3));\\n    for (int i = 0; i < m; i++) cin >> edges[i][0] >> edges[i][1] >> edges[i][2];\\n    Solution sol;\\n    vector<int> res = sol.solve(n, edges, s);\\n    for (int i = 0; i < n; i++) {{\\n        if (i) cout << ' ';\\n        cout << (res[i] == INT_MAX ? -1 : res[i]);\\n    }}\\n    cout << endl;\\n    return 0;\\n}}\\n//APPEND END"
+CRITICAL TEMPLATE RULES (Apply to all 5 languages):
+1. Use //PREPEND BEGIN ... //PREPEND END for imports.
+2. Use //TEMPLATE BEGIN ... //TEMPLATE END for the solution stub (DO NOT INCLUDE THE ANSWER).
+3. Use //APPEND BEGIN ... //APPEND END for the main driver code that reads stdin and prints output.
+4. Ensure the APPEND I/O logic exactly matches the test case input format.
 
 CRITICAL TEST CASE RULES:
-1. You MUST generate EXACTLY 20 items in the `hidden_test_cases` array.
-2. The first 16 test cases should cover standard functionality and constraints, including: empty/single-element inputs, all-same elements, already sorted, reverse sorted, and various sizes.
-3. The LAST 4 test cases (items 17 to 20) MUST be LARGE stress tests: generate inputs with at least 3000-5000 elements to ensure O(n^2) solutions exceed the time limit. These must be valid, real inputs with correctly computed outputs.
-4. ABSOLUTELY NO UNESCAPED QUOTES inside JSON values. If you use quotes inside the text, use single quotes (') or escape double quotes (\\").
-5. MOST CRITICAL: The `input` field of EVERY test case MUST be in the EXACT SAME FORMAT that the //APPEND driver reads from stdin. For example, if the driver reads `n` on the first line and then `n` numbers on the second line, every test case input MUST have exactly those two lines in that order. The test cases and the APPEND driver are executed together — any format mismatch will cause a Runtime Error on ALL test cases.
+1. EXPLICITLY generate 20 items in `hidden_test_cases`.
+2. Items 17-20 MUST be large stress tests (arrays of 3000+ elements).
 {rag_context}
 """
     client = Groq(api_key=groq_api_key)
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": prompt_text
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt_text}
             ],
             model="llama-3.3-70b-versatile",
             temperature=0.7,
