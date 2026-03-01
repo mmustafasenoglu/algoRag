@@ -6,12 +6,17 @@ from groq import Groq
 from dotenv import load_dotenv
 
 # Optional RAG Context dependencies
+embedding_model = None
 try:
     from fastembed import TextEmbedding
     import re
     from pinecone import Pinecone
     RAG_AVAILABLE = True
-except ImportError:
+    # Load model globally to avoid OOM and slow startup on every request
+    print("Loading embedding model...")
+    embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+except Exception as e:
+    print(f"RAG dependencies or model loading failed: {e}")
     RAG_AVAILABLE = False
 
 load_dotenv()
@@ -20,6 +25,15 @@ app = FastAPI(title="AlgoRAG API", description="AI Problem Generation Microservi
 
 class ProblemRequest(BaseModel):
     prompt: str
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "groq_configured": bool(os.environ.get("GROQ_API_KEY")),
+        "pinecone_configured": bool(os.environ.get("PINECONE_API_KEY")),
+        "rag_available": RAG_AVAILABLE
+    }
 
 @app.post("/api/generate_problem")
 async def generate_problem(request: ProblemRequest):
@@ -36,10 +50,9 @@ async def generate_problem(request: ProblemRequest):
     pinecone_api_key = os.environ.get("PINECONE_API_KEY")
     rag_context = ""
     
-    if pinecone_api_key and RAG_AVAILABLE:
+    if pinecone_api_key and RAG_AVAILABLE and embedding_model:
         try:
             # 1. Generate embedding for user prompt
-            embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
             query_vector = list(embedding_model.embed([prompt_text]))[0].tolist()
             
             # 2. Search Pinecone vector database
@@ -55,17 +68,15 @@ async def generate_problem(request: ProblemRequest):
             # 3. Format RAG context
             if search_results.get("matches"):
                 rag_context = "\n\n--- REFERENCE EXAMPLES (For Inspiration & Quality Standards) ---\n"
-                rag_context += "Use the following high-quality LeetCode examples to understand the expected format, tone, and complexity. Base the style and rigor of your generated problem on these examples.\n\n"
+                rag_context += "Use the following high-quality examples to understand the expected format.\n\n"
                 for i, match in enumerate(search_results["matches"]):
                     meta = match.get("metadata", {})
                     title = meta.get("title", "Unknown")
                     diff = meta.get("difficulty", "Medium")
                     desc = meta.get("description", "")
-                    
                     rag_context += f"Example {i+1}:\nTitle: {title}\nDifficulty: {diff}\nDescription:\n{desc}\n\n"
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"RAG Vector Search Error: {e}")
+            print(f"RAG Error (Non-fatal): {e}")
             
     # Instruct AI to construct the complete API payload
     system_prompt = f"""
@@ -106,8 +117,8 @@ The JSON object MUST have the following strict structure:
 
 CRITICAL TEMPLATE RULES (Apply to all 5 languages):
 1. Use //PREPEND BEGIN ... //PREPEND END for imports.
-2. Use //TEMPLATE BEGIN ... //TEMPLATE END for the solution stub (DO NOT INCLUDE THE ANSWER).
-3. Use //APPEND BEGIN ... //APPEND END for the main driver code that reads stdin and prints output.
+2. Use //TEMPLATE BEGIN ... //TEMPLATE END for the solution stub.
+3. Use //APPEND BEGIN ... //APPEND END for the main driver code.
 4. Ensure the APPEND I/O logic exactly matches the test case input format.
 
 CRITICAL TEST CASE RULES:
@@ -131,66 +142,16 @@ CRITICAL TEST CASE RULES:
         generated_content = chat_completion.choices[0].message.content
         parsed_json = json.loads(generated_content)
         
-        # --- Step 2: Validate edge test case outputs via a second Groq call ---
-        hidden_cases = parsed_json.get("hidden_test_cases", [])
-        edge_cases = hidden_cases[16:]  # items 17-20
-        if edge_cases:
-            validation_prompt = (
-                "You are an expert computational engine. Below is a programming problem description, "
-                "a solution template stub, and 4 large edge test case inputs designed for stress testing. "
-                "Your task is to re-compute the EXACT CORRECT EXPECTED OUTPUT for these 4 inputs "
-                "according to the problem rules. DO NOT write code; just provide the outputs in JSON.\n\n"
-                f"Problem Title: {parsed_json.get('title')}\n"
-                f"Description: {parsed_json.get('description')}\n\n"
-                "Inputs to re-evaluate:\n"
-            )
-            for idx, ec in enumerate(edge_cases):
-                validation_prompt += f"Input {idx+17}:\n{ec.get('input')}\n\n"
-            
-            validation_prompt += (
-                "Respond ONLY with a valid JSON object matching this schema exactly:\n"
-                "{\n"
-                '  "corrected_outputs": [\n'
-                '    {"output": "exact string output for Input 17"},\n'
-                '    {"output": "exact string output for Input 18"},\n'
-                '    {"output": "exact string output for Input 19"},\n'
-                '    {"output": "exact string output for Input 20"}\n'
-                "  ]\n"
-                "}\n"
-            )
-            try:
-                validation_completion = client.chat.completions.create(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a precise algorithmic validator. You compute correct outputs for given inputs perfectly."
-                        },
-                        {
-                            "role": "user",
-                            "content": validation_prompt
-                        }
-                    ],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.1, # Extremely low temperature for deterministic validation
-                    max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
-                validation_content = validation_completion.choices[0].message.content
-                validation_json = json.loads(validation_content)
-                corrected_outputs = validation_json.get("corrected_outputs", [])
-                
-                # Apply corrections if lengths match
-                if len(corrected_outputs) == len(edge_cases):
-                    for idx in range(len(edge_cases)):
-                        hidden_cases[16 + idx]["output"] = corrected_outputs[idx].get("output", edge_cases[idx].get("output"))
-                parsed_json["hidden_test_cases"] = hidden_cases
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(f"Edge case validation Groq API error: {e}")
-                # If secondary validation fails, we proceed with the originally generated test cases instead of failing the whole request.
-                pass 
-                
+        # Validate critical fields
+        required = ["title", "description", "input_description", "output_description", "hint", "samples", "hidden_test_cases", "template"]
+        for field in required:
+            if field not in parsed_json:
+                parsed_json[field] = [] if field in ["samples", "hidden_test_cases", "tags"] else {} if field == "template" else ""
+
         return parsed_json
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"API ERROR: {error_details}")
+        raise HTTPException(status_code=500, detail=f"AI generation failed: {str(e)}")
