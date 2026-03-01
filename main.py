@@ -1,3 +1,10 @@
+import os
+import json
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from groq import Groq
+from dotenv import load_dotenv
+
 # Optional RAG Context dependencies
 embedding_model = None
 RAG_ENABLED = os.environ.get("ENABLE_RAG", "false").lower() == "true"
