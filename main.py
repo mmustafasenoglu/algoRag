@@ -1,104 +1,42 @@
 import os
 import json
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from groq import Groq
+import traceback
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-
-# Optional RAG Context dependencies
-embedding_model = None
-RAG_ENABLED = os.environ.get("ENABLE_RAG", "false").lower() == "true"
-
-try:
-    from fastembed import TextEmbedding
-    from pinecone import Pinecone
-    if RAG_ENABLED:
-        print("Loading embedding model...")
-        embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
-except Exception as e:
-    print(f"RAG dependencies failed to load: {e}")
-    RAG_ENABLED = False
 
 load_dotenv()
 
-app = FastAPI(title="AlgoRAG API")
-
-class ProblemRequest(BaseModel):
-    prompt: str
+app = FastAPI(title="AlgoRAG API Debug")
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "groq_configured": bool(os.environ.get("GROQ_API_KEY")),
-        "pinecone_configured": bool(os.environ.get("PINECONE_API_KEY")),
-        "rag_enabled": RAG_ENABLED,
-        "embedding_model_loaded": embedding_model is not None
-    }
+    return {"status": "ok", "debug_mode": True}
 
 @app.post("/api/generate_problem")
-async def generate_problem(request: ProblemRequest):
-    print(f"DEBUG: Starting generation for prompt: {request.prompt[:50]}...")
+async def generate_problem(request: Request):
+    print("DEBUG: Root handler reached.")
     try:
+        body = await request.json()
+        prompt_text = body.get("prompt", "default")
+        
+        # Heavy imports inside to protect boot
+        print("DEBUG: Importing dependencies...")
+        from groq import Groq
+        
         groq_api_key = os.environ.get("GROQ_API_KEY")
         if not groq_api_key:
-            return {"error": True, "message": "GROQ_API_KEY is missing in environment"}
-            
-        rag_context = ""
-        if RAG_ENABLED and embedding_model:
-            try:
-                print("DEBUG: Fetching RAG context...")
-                pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-                index = pc.Index("algoforge-rag")
-                query_vector = list(embedding_model.embed([request.prompt]))[0].tolist()
-                search_results = index.query(vector=query_vector, top_k=3, include_metadata=True)
-                
-                if search_results.get("matches"):
-                    rag_context = "\n\n--- REFERENCE EXAMPLES ---\n"
-                    for i, match in enumerate(search_results["matches"]):
-                        meta = match.get("metadata", {})
-                        rag_context += f"Example {i+1}:\nTitle: {meta.get('title')}\nDescription: {meta.get('description')}\n\n"
-                        
-            except Exception as rag_e:
-                print(f"DEBUG RAG Error (Non-fatal): {rag_e}")
-                
-        system_prompt = f"""
-Sana verilen konuya uygun bir algoritma problemi üret. 
-Yanıtın TAMAMEN Türkçe olsun. 
-Yanıtın sadece JSON formatında olsun:
+            return {"error": True, "message": "GROQ_API_KEY missing"}
 
-{{
-  "title": "Başlık",
-  "description": "HTML Açıklama",
-  "input_description": "Input Açıklaması",
-  "output_description": "Output Açıklaması",
-  "hint": "İpucu",
-  "tags": ["Dizi"],
-  "samples": [
-    {{ "input": "...", "output": "...", "explanation": "..." }}
-  ],
-  "hidden_test_cases": [
-    {{ "input": "...", "output": "..." }}
-  ],
-  "template": {{
-    "C++": "// CODE",
-    "Java": "// CODE",
-    "Python3": "# CODE",
-    "C": "// CODE",
-    "JavaScript": "// CODE"
-  }}
-}}
-{rag_context}
-"""
-        
-        print("DEBUG: Initializing Groq client...")
+        print("DEBUG: Calling Groq...")
         client = Groq(api_key=groq_api_key)
         
-        print("DEBUG: Calling Groq API...")
+        system_prompt = "Bir algoritma problemi üret. Sadece JSON döndür."
+        
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.prompt}
+                {"role": "user", "content": prompt_text}
             ],
             model="llama-3.3-70b-versatile",
             temperature=0.7,
@@ -106,16 +44,13 @@ Yanıtın sadece JSON formatında olsun:
             response_format={"type": "json_object"}
         )
         
-        print("DEBUG: Groq API response received.")
-        content = chat_completion.choices[0].message.content
-        return json.loads(content)
-        
+        return json.loads(chat_completion.choices[0].message.content)
+
     except Exception as e:
-        import traceback
-        err_msg = traceback.format_exc()
-        print(f"CRITICAL ERROR:\n{err_msg}")
+        err = traceback.format_exc()
+        print(f"CRITICAL ERROR:\n{err}")
         return {
-            "error": True,
+            "error": True, 
             "message": str(e),
-            "traceback": err_msg
+            "traceback": err
         }
